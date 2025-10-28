@@ -1,0 +1,336 @@
+// Starfinder 1e Hacking Mini-Game Macro (Computers Check)
+// Final Version: Includes Trained-Only check, Unsecured Access bypass, Authorization bonuses, and accurate CRB access language.
+
+// --- Helper Function: Get Roll Result Text (UNCHANGED) ---
+/**
+ * Determines the outcome of the hack attempt based on the Starfinder CRB rules (p. 214).
+ * NOTE: The 'Great Success' tier (beat by 5) is maintained for VTT quality of life but is not a CRB standard tier.
+ * @param {number} rollResult The total of the Computers check roll.
+ * @param {number} finalDC The target Difficulty Class.
+ * @param {boolean} keyUsed True if Security Key was used for bonus.
+ * @param {boolean} passUsed True if Password was used for bonus.
+ * @returns {{title: string, message: string, class: string, lockoutKey: boolean, lockoutPass: boolean}} Result details.
+ */
+function getHackResult(rollResult, finalDC, keyUsed, passUsed) {
+    const resultDelta = rollResult - finalDC;
+    let result = { 
+        message: "", 
+        class: "", 
+        title: "",
+        lockoutKey: false, 
+        lockoutPass: false    
+    };
+
+    if (resultDelta >= 0) {
+        // --- SUCCESS (Access/Root Access) ---
+        if (resultDelta >= 20) {
+            // Critical Success: Beat DC by 20+ (Grants Root Access)
+            result.title = 'ROOT ACCESS GRANTED!';
+            // UPDATED: Using the precise rulebook text for Root Access.
+            result.message = 'You gain **Root Access**, allowing you to use all of a computer’s functions and modules, bypass or set conditions for its countermeasures, and look at, copy, add to, and delete any of its secured data.'; 
+            result.class = 'sfrpg-crit-success';
+        } else if (resultDelta >= 5) {
+            // Great Success: Beat DC by 5+ (Grants Full Access, maintained for clarity)
+            result.title = 'CONTROL GAINED!';
+            result.message = 'You successfully hack the system. You gain **Full Access** to the system and can perform one or more complicated tasks (GM\'s discretion).';
+            result.class = 'sfrpg-success';
+        } else {
+            // Basic Success (Grants Standard Access)
+            result.title = 'ACCESS GAINED';
+            result.message = 'You successfully hack the system and gain **Access** to the basic unsecured functions.';
+            result.class = 'sfrpg-success';
+        }
+    } else {
+        // --- FAILURE ---
+        if (resultDelta <= -5) {
+            // Critical Failure: Fail DC by 5 or more (Triggers Countermeasures and Locks out Credentials)
+            result.title = 'BREACH DETECTED!';
+            result.message = 'You fail the check, and the system detects the breach! The GM activates the system\'s **Countermeasures** (Alarm, Lockdown, etc.).';
+            result.class = 'sfrpg-crit-failure';
+            
+            // Critical Failure Lockout Rule (CRB p.214)
+            if (keyUsed) result.lockoutKey = true;
+            if (passUsed) result.lockoutPass = true;
+            
+        } else {
+            // Simple Failure
+            result.title = 'HACK FAILED';
+            result.message = 'The hack fails. You run into roadblocks and are unable to complete the attempt in time. You may attempt the hack again without immediate consequence.';
+            result.class = 'sfrpg-failure';
+        }
+    }
+
+    // Add specific lockout warnings to the message
+    if (result.lockoutKey || result.lockoutPass) {
+          let lockoutMessage = `<br><br>🚨 **CRITICAL FAILURE:** The system locked out the following credentials, which no longer grant a bonus to future checks:`;
+          if (result.lockoutKey) lockoutMessage += ` **Security Key** (+5 bonus LOST).`;
+          if (result.lockoutPass) lockoutMessage += ` **Password** (+5 bonus LOST).`;
+          result.message += lockoutMessage;
+    }
+
+    return result;
+}
+
+// --- NEW HELPER FUNCTION: Calculate Required Actions ---
+function calculateActions(tier, dcIncrease) {
+    let fullActions = tier;
+    
+    if (dcIncrease > 0) {
+        let reductionSteps = Math.floor(dcIncrease / 5);
+        let currentActions = fullActions;
+        
+        for (let i = 0; i < reductionSteps; i++) {
+            // Cut time in half, minimum 1 full action
+            currentActions = Math.max(1, Math.ceil(currentActions / 2));
+        }
+        fullActions = currentActions;
+    }
+    return fullActions;
+}
+
+
+// 1. Validate a single token is selected
+if (canvas.tokens.controlled.length !== 1) {
+    return ui.notifications.warn("Please select exactly one token to attempt the Computers check. 🤖");
+}
+
+const token = canvas.tokens.controlled[0];
+const actor = token.actor;
+const skillKey = "com"; 
+
+// --- TRAINED-ONLY CHECK (CRB p.134) ---
+let skillBonusTerm = `0`; 
+let skillTotal = 0;        
+
+if (actor.system.skills[skillKey]) {
+    skillTotal = actor.system.skills[skillKey].mod;
+    skillBonusTerm = `@skills.${skillKey}.mod`; 
+} else {
+    ui.notifications.error(`${actor.name} is not trained in Computers. This skill is Trained-Only and cannot be attempted.`);
+    return;
+}
+// ----------------------------------------
+
+
+// --- GM Dialogue for Difficulty (System Tier) ---
+let tierOptions = '';
+for (let i = 1; i <= 10; i++) {
+    const baseDC = 13 + (4 * i); 
+    tierOptions += `<option value="${i}">Tier ${i} (Base DC ${baseDC})</option>`;
+}
+
+// Initial time calculation for the default dialog state (Tier 1, DC Increase 0)
+let initialActions = calculateActions(1, 0); 
+
+const tierContent = `
+    <form>
+        <fieldset>
+            <legend>Computer State & Difficulty</legend>
+            <div class="form-group">
+                <label for="initialAccess">Current Access State (Hack required only if Secured):</label>
+                <select id="initialAccess" name="initialAccess">
+                    <option value="check">Secured Access (HACK REQUIRED)</option>
+                    <option value="unsecured">Unsecured Access (SKIP HACK, Basic Access)</option>
+                    <option value="root">Unsecured Root Access (SKIP HACK, Root Access)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="tier">Computer System Tier (DC 13 + 4 per Tier):</label>
+                <select id="tier" name="tier">${tierOptions}</select>
+            </div>
+            <div class="form-group">
+                <label for="bonus">Additional DC Modifier (e.g., Firewalls):</label>
+                <input type="number" id="bonus" name="bonus" value="0">
+            </div>
+        </fieldset>
+        
+        <fieldset>
+            <legend>Hacking Modifiers</legend>
+            <div class="form-group">
+                <label for="timeDCIncrease">Increase DC to Reduce Time (in increments of 5):</label>
+                <input type="number" id="timeDCIncrease" name="timeDCIncrease" value="0" min="0" step="5">
+                <p class="notes" style="font-size: 0.8em; color: #aaa;">Each +5 DC cuts the time (full actions) in half (minimum 1 full action).</p>
+            </div>
+            <div class="form-group" style="border-top: 1px solid #777; padding-top: 5px; margin-top: 5px;">
+                <label>Current Time Required:</label>
+                <div id="action-summary" style="font-weight: bold; color: #ff9900;">${initialActions} Full Action(s)</div>
+            </div>
+            <div class="form-group">
+                <label>Acquired Credentials (Each grants +5 bonus to check):</label>
+                <div style="display: flex; gap: 10px; margin-top: 5px;">
+                    <label style="flex: 1;"><input type="checkbox" name="securityKey" value="5"> Security Key</label>
+                    <label style="flex: 1;"><input type="checkbox" name="password" value="5"> Password</label>
+                </div>
+            </div>
+        </fieldset>
+    </form>
+`;
+
+new Dialog({
+    title: "Define Hacking Attempt",
+    content: tierContent,
+    buttons: {
+        hack: {
+            icon: '<i class="fas fa-terminal"></i>',
+            label: "Start Hack / Grant Access",
+            callback: async (html) => { 
+                try {
+                    const tier = parseInt(html.find('[name="tier"]')[0].value);
+                    const initialAccess = html.find('[name="initialAccess"]')[0].value;
+
+                    // --- CHECK FOR UNSECURED ACCESS BYPASS ---
+                    if (initialAccess !== 'check') {
+                        let accessTitle = initialAccess === 'unsecured' ? "UNSECURED ACCESS GRANTED" : "UNSECURED ROOT ACCESS GRANTED";
+                        let accessMessage = initialAccess === 'unsecured' 
+                            ? "Access granted instantly. Basic functions (info retrieval, minor controls) are available."
+                            : "Root Access granted instantly. All functions and modules are available.";
+
+                        const bypassContent = `<div class="starfinder-hack-result sfrpg-success">
+                            <h2><i class="fas fa-desktop"></i> ${accessTitle}</h2><hr>
+                            <p><strong>Hacker:</strong> ${actor.name}</p>
+                            <p><strong>System Tier:</strong> ${tier}</p>
+                            <hr>
+                            <p>${accessMessage}</p>
+                        </div>`;
+
+                        ChatMessage.create({
+                            user: game.user.id,
+                            speaker: ChatMessage.getSpeaker({ token: token }),
+                            flavor: `Computer Access Granted (Unsecured)`,
+                            content: bypassContent,
+                            sound: CONFIG.sounds.bell
+                        });
+                        return; // Stop here, no roll needed
+                    }
+                    // --- END BYPASS CHECK ---
+
+                    const bonusDC = parseInt(html.find('[name="bonus"]')[0].value) || 0;
+                    const timeDCIncrease = parseInt(html.find('[name="timeDCIncrease"]')[0].value) || 0; 
+
+                    // Authorization Checkboxes
+                    const keyUsed = html.find('[name="securityKey"]')[0].checked;
+                    const passUsed = html.find('[name="password"]')[0].checked;
+                    const keyBonus = keyUsed ? 5 : 0;
+                    const passBonus = passUsed ? 5 : 0;
+                    const totalAuthBonus = keyBonus + passBonus;
+
+                    // 2. Calculate Difficulty Class (DC) and Time
+                    let baseDC = 13 + (4 * tier) + bonusDC;
+                    let finalDC = baseDC + timeDCIncrease; // Add DC increase for time reduction
+
+                    // Get the final number of full actions
+                    let fullActions = calculateActions(tier, timeDCIncrease);
+
+                    let speedText = `${fullActions} Full Action${fullActions > 1 ? 's' : ''}`;
+                    if (timeDCIncrease > 0) {
+                        speedText += ` (DC increased by ${timeDCIncrease})`;
+                    }
+
+                    // 3. Perform the Computers Skill Roll
+                    const rollFlavor = `Computers Check to Hack Tier ${tier} System`;
+                    
+                    const roll = new Roll(`1d20 + ${skillBonusTerm} + ${totalAuthBonus}`, actor.getRollData()); 
+                    
+                    await roll.evaluate(); 
+                    
+                    // Render the dice roll HTML
+                    const rollHTML = await roll.render();
+
+                    // 4. Generate Results and Chat Message
+                    const rollResult = roll.total;
+                    const resultDelta = rollResult - finalDC;
+                    
+                    const result = getHackResult(rollResult, finalDC, keyUsed, passUsed);
+                    
+                    // Create color-coded result margin
+                    const marginText = resultDelta >= 0 
+                        ? `<span style="color: green; font-weight: bold;">SUCCESS: Beat DC by ${resultDelta}</span>`
+                        : `<span style="color: red; font-weight: bold;">FAILURE: Missed DC by ${Math.abs(resultDelta)}</span>`;
+
+                    // Construct Authorization Summary
+                    let authSummary = "";
+                    if (totalAuthBonus > 0) {
+                        authSummary += `<p><i class="fas fa-key"></i> <strong>Credentials Used:</strong> `;
+                        if (keyUsed) authSummary += `Security Key (+5)`;
+                        if (keyUsed && passUsed) authSummary += `, `;
+                        if (passUsed) authSummary += `Password (+5)`;
+                        authSummary += `</p>`;
+                    } else {
+                        authSummary += `<p><i class="fas fa-key"></i> <strong>Credentials Used:</strong> None</p>`;
+                    }
+
+                    // Format the Chat Message
+                    const chatContent = `
+                        <div class="starfinder-hack-result ${result.class}">
+                            <h2><i class="fas fa-terminal"></i> ${result.title}</h2>
+                            
+                            <h3 style="text-align: center; color: #ff9900; background: rgba(0,0,0,0.1); padding: 5px; margin-top: 5px; border-radius: 3px;">${rollFlavor}</h3>
+                            
+                            <hr>
+                            
+                            <div class="hack-parameters">
+                                <p><i class="fas fa-user-astronaut"></i> <strong>Hacker:</strong> ${actor.name} (Base Bonus: +${skillTotal})</p>
+                                ${authSummary}
+                                <p><i class="fas fa-desktop"></i> <strong>System Tier:</strong> ${tier}</p>
+                                <p><i class="fas fa-clock"></i> <strong>Time Attempted:</strong> ${speedText}</p>
+                                <p><i class="fas fa-lock"></i> <strong>Target DC:</strong> ${finalDC} (Base ${baseDC} ${timeDCIncrease > 0 ? ` + ${timeDCIncrease} (Time Reduction)` : ''})</p>
+                            </div>
+                            
+                            <hr>
+                            <p>${result.message}</p>
+
+                            <hr>
+                            <div class="hack-roll-summary" style="margin-top: 10px;">
+                                <p><i class="fas fa-calculator"></i> <strong>Result Margin:</strong> ${marginText}</p>
+                                ${rollHTML}
+                            </div>
+                        </div>
+                    `;
+
+                    // 5. Send the roll and result to the chat 
+                    const chatData = {
+                        user: game.user.id,
+                        speaker: ChatMessage.getSpeaker({ token: token }),
+                        flavor: rollFlavor, 
+                        content: chatContent, 
+                        rolls: [roll.toJSON()], 
+                        sound: CONFIG.sounds.dice 
+                    };
+
+                    ChatMessage.create(chatData, {});
+                
+                } catch (e) {
+                    // Log the error and notify the user (GM)
+                    console.error("Starfinder Hacking Macro crashed:", e);
+                    ui.notifications.error(`Starfinder Hacking Macro crashed. Check console (F12) for details: ${e.message}`);
+                }
+            }
+        },
+        cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: "Cancel"
+        }
+    },
+    default: "hack",
+
+    // --- NEW: RENDER HOOK FOR DYNAMIC UPDATES ---
+    render: (html) => {
+        // Function to update the displayed number of actions
+        const updateActionSummary = () => {
+            const tier = parseInt(html.find('[name="tier"]')[0].value) || 1;
+            const timeDCIncrease = parseInt(html.find('[name="timeDCIncrease"]')[0].value) || 0;
+            const actions = calculateActions(tier, timeDCIncrease);
+            
+            const actionText = `${actions} Full Action${actions > 1 ? 's' : ''}`;
+            html.find('#action-summary').text(actionText);
+        };
+
+        // Attach event listeners to the relevant fields
+        html.find('[name="tier"]').on('change', updateActionSummary);
+        html.find('[name="timeDCIncrease"]').on('change keyup', updateActionSummary);
+        
+        // Ensure initial state is correct (already set in HTML, but good practice)
+        updateActionSummary();
+    }
+    // --- END RENDER HOOK ---
+}).render(true);
